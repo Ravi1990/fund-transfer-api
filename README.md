@@ -5,34 +5,59 @@ A production-grade Fund Transfer API built with PHP 8.4, Symfony 8, MySQL 8, and
 ## Quick Start
 
 ```bash
-# 1. Start all services
+git clone https://github.com/Ravi1990/fund-transfer-api.git
+cd fund-transfer-api
 docker compose up -d --build
+```
 
-# 2. Run database migrations
-docker compose exec php php bin/console doctrine:database:create --if-not-exists
-docker compose exec php php bin/console doctrine:migrations:migrate --no-interaction
+That's it. On startup the container automatically:
+- Waits for MySQL to be ready
+- Runs database migrations
+- Seeds 5 sample accounts
+- Starts PHP-FPM
 
-# 3. Verify health
+Wait ~30 seconds then verify:
+```bash
 curl http://localhost:8080/health
 ```
+
+Expected response:
+```json
+{"status":"ok","checks":{"database":"ok","redis":"ok"}}
+```
+
+---
+
+## Sample Accounts (auto-seeded on startup)
+
+| Owner | Public ID | Balance | Status |
+|-------|-----------|---------|--------|
+| Alice Johnson | `01KS4RBSPYCJWEGFF0VH3F1YK2` | $10,000.00 | active |
+| Bob Smith | `01KS4RBSS33SQ50FZC0GVR4P8T` | $5,000.00 | active |
+| Carol White | `01KS4RBSSJ2W85QCVNTT05K9K6` | $2,500.00 | active |
+| Dave Brown | `01KS4RBSSSAD9Y3GGHKE6MJSV8` | $0.00 | active |
+| Eve Davis | `01KS4RBSSZCQ88BCXJE8VJZ0XA` | $1,000.00 | frozen |
+
+> **Note:** ULIDs are regenerated on each fresh start (`docker compose down -v && docker compose up -d --build`).
+> Run `docker compose logs php | grep "Public ID"` to see current ULIDs.
+
+---
 
 ## API Reference
 
 ### POST /api/v1/transfers
 
-Initiate a fund transfer between two accounts.
-
 ```bash
-curl -X POST http://localhost:8080/api/v1/transfers \
+# Happy path — Alice sends $100.50 to Bob
+curl -s -X POST http://localhost:8080/api/v1/transfers \
   -H "Content-Type: application/json" \
   -d '{
-    "idempotency_key": "unique-client-key-001",
-    "from_account_id": "01HXYZ1234567890ABCDEFGHIJ",
-    "to_account_id":   "01HXYZ1234567890ABCDEFGHIK",
+    "idempotency_key": "test-001",
+    "from_account_id": "01KS4RBSPYCJWEGFF0VH3F1YK2",
+    "to_account_id":   "01KS4RBSS33SQ50FZC0GVR4P8T",
     "amount":          "100.50",
-    "currency":        "USD",
-    "description":     "Optional description"
-  }'
+    "currency":        "USD"
+  }' | python3 -m json.tool
 ```
 
 **Response 201:**
@@ -40,12 +65,51 @@ curl -X POST http://localhost:8080/api/v1/transfers \
 {
   "transfer_id":     "01HABC...",
   "status":          "completed",
-  "from_account_id": "01HXYZ...",
-  "to_account_id":   "01HXYZ...",
+  "from_account_id": "01KS4RBSPYCJWEGFF0VH3F1YK2",
+  "to_account_id":   "01KS4RBSS33SQ50FZC0GVR4P8T",
   "amount":          "100.50",
   "currency":        "USD",
   "created_at":      "2024-01-15T10:30:00+00:00"
 }
+```
+
+```bash
+# Idempotency — send same request again, balance debited only once
+curl -s -X POST http://localhost:8080/api/v1/transfers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idempotency_key": "test-001",
+    "from_account_id": "01KS4RBSPYCJWEGFF0VH3F1YK2",
+    "to_account_id":   "01KS4RBSS33SQ50FZC0GVR4P8T",
+    "amount":          "100.50",
+    "currency":        "USD"
+  }' | python3 -m json.tool
+```
+
+```bash
+# Insufficient funds — Dave has $0
+curl -s -X POST http://localhost:8080/api/v1/transfers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idempotency_key": "test-002",
+    "from_account_id": "01KS4RBSSSAD9Y3GGHKE6MJSV8",
+    "to_account_id":   "01KS4RBSPYCJWEGFF0VH3F1YK2",
+    "amount":          "10.00",
+    "currency":        "USD"
+  }' | python3 -m json.tool
+```
+
+```bash
+# Frozen account — Eve is frozen
+curl -s -X POST http://localhost:8080/api/v1/transfers \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idempotency_key": "test-003",
+    "from_account_id": "01KS4RBSSZCQ88BCXJE8VJZ0XA",
+    "to_account_id":   "01KS4RBSPYCJWEGFF0VH3F1YK2",
+    "amount":          "10.00",
+    "currency":        "USD"
+  }' | python3 -m json.tool
 ```
 
 **Error responses:**
@@ -60,7 +124,7 @@ curl -X POST http://localhost:8080/api/v1/transfers \
 | 422 | CURRENCY_MISMATCH | Account currency mismatch |
 | 422 | ACCOUNT_FROZEN | Account not active |
 | 429 | RATE_LIMIT_EXCEEDED | Too many requests (Retry-After header included) |
-| 500 | INTERNAL_ERROR | Unexpected error (never leaks internals) |
+| 500 | INTERNAL_ERROR | Unexpected error |
 
 All errors use this envelope:
 ```json
@@ -75,26 +139,17 @@ All errors use this envelope:
 
 ### GET /api/v1/transfers/{ulid}
 
-Retrieve a transfer by public ULID.
-
 ```bash
-curl http://localhost:8080/api/v1/transfers/01HABC...
+curl -s http://localhost:8080/api/v1/transfers/01HABC... | python3 -m json.tool
 ```
-
-**Response 200:** Same shape as POST 201 response.
 
 ### GET /health
 
 ```bash
-curl http://localhost:8080/health
+curl -s http://localhost:8080/health | python3 -m json.tool
 ```
 
-```json
-{
-  "status": "ok",
-  "checks": { "database": "ok", "redis": "ok" }
-}
-```
+---
 
 ## Running Tests
 
@@ -109,7 +164,7 @@ docker compose exec \
   -e APP_ENV=test \
   php php bin/console doctrine:migrations:migrate --no-interaction
 
-# Run all tests
+# Run all 41 tests
 docker compose exec \
   -e APP_ENV=test \
   -e DATABASE_URL="mysql://app:app_pass@mysql:3306/fund_transfer_test?serverVersion=8.0&charset=utf8mb4" \
@@ -119,32 +174,51 @@ docker compose exec \
   php php bin/phpunit --testdox
 ```
 
+---
+
+## Architecture Highlights
+
+- **Pessimistic locking** — `SELECT FOR UPDATE` with deadlock-safe ordered locking (always lock lower account ID first)
+- **Two-layer idempotency** — Redis fast path (24h TTL) + DB `UNIQUE` constraint fallback
+- **Integer cents** — Money stored as `BIGINT`, `bcmath` only at API input/output boundaries
+- **Three-state machine** — `pending → processing → completed/failed` with full audit log
+- **DDD layering** — Domain / Application / Infrastructure / Controller strictly separated
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for full decision records.
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `APP_ENV` | `dev` | Application environment |
-| `APP_SECRET` | — | Symfony secret (min 32 chars) |
-| `DATABASE_URL` | — | MySQL DSN |
-| `REDIS_URL` | — | Redis DSN |
+| `DATABASE_URL` | see `.env` | MySQL DSN |
+| `REDIS_URL` | see `.env` | Redis DSN |
 | `RATE_LIMIT_MAX` | `100` | Max transfers per window per account |
 | `RATE_LIMIT_WINDOW` | `3600` | Rate limit window in seconds |
-| `LOCK_DSN` | `flock` | Symfony Lock store DSN |
-| `DEFAULT_URI` | `http://localhost` | Base URI for router context |
+
+---
 
 ## What I'd Add Next
 
-- **Async processing via Symfony Messenger + outbox pattern** — The current synchronous flow is correct and simple. Under very high load, decoupling transfer initiation from execution via a message queue (with the outbox pattern for exactly-once delivery) would improve throughput and resilience.
-- **Circuit breaker for DB unavailability** — Fail fast when MySQL is unreachable rather than queuing requests that will all timeout.
-- **Event sourcing for immutable audit trail** — Replace `transfer_audit_log` with an append-only event store. Every state change becomes an immutable event, making the audit trail tamper-evident.
-- **ProxySQL in production network topology** — PHP-FPM workers each hold one DB connection. Under traffic spikes, connection exhaustion is the primary scaling bottleneck. ProxySQL pools connections across workers transparently.
-- **k6 load test suite with SLO thresholds** — 500 RPS targeting the transfer endpoint, measuring p50/p99 latency, `lock_wait_time`, DB QPS, Redis hit rate, and error rate under contention.
-- **Authentication layer** — API key or JWT validation at the gateway/middleware level. Intentionally out of scope for this deliverable.
+**Authentication** — JWT or API key validation at the middleware layer. Intentionally excluded from this deliverable as per scope, but it's the first thing I'd add before any real traffic.
+
+**Async transfer processing** — The synchronous flow is correct for this scope. At higher load I'd introduce Symfony Messenger with an outbox pattern to decouple initiation from execution and guarantee exactly-once delivery even under failures.
+
+**Connection pooling** — PHP-FPM holds one DB connection per worker. Under load spikes this exhausts MySQL's connection limit. ProxySQL in front of MySQL solves this without application changes.
+
+**Load testing** — A k6 suite at 500 RPS measuring p99 latency, lock wait times, and Redis hit rate with CI-enforced SLO thresholds.
+
+**Circuit breaker** — Fail fast when MySQL or Redis is unreachable rather than letting requests pile up and timeout.
+
+**Event sourcing** — Replace the audit log table with an append-only event store for a fully immutable, tamper-evident transfer history.
+
+---
 
 ## Time Spent
 
-Approximately 6–8 hours including iterative debugging of Symfony 8 / DoctrineBundle 3 / PHP 8.4 compatibility issues encountered during setup.
+~8 hours including debugging Symfony 8 / PHP 8.4 / DoctrineBundle 3 compatibility issues during initial setup.
 
 ## AI Tools Used
 
-Claude (Anthropic) was used as a pair-programming assistant throughout. Prompts focused on: architecture decisions with explicit justification requirements, phase-by-phase generation with confirmation gates, and iterative debugging of version compatibility issues. All architectural decisions, tradeoffs, and code were reviewed and validated against the specification.
+Claude (Anthropic) was used as a pair-programming assistant throughout development. All architectural decisions, tradeoffs, and code were reviewed and validated against the specification. Every decision in ARCHITECTURE.md reflects my own understanding and professional judgment.
