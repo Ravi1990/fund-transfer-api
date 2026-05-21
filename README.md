@@ -7,6 +7,7 @@ A production-grade Fund Transfer API built with PHP 8.4, Symfony 8, MySQL 8, and
 ```bash
 git clone https://github.com/Ravi1990/fund-transfer-api.git
 cd fund-transfer-api
+cp .env.example .env
 docker compose up -d --build
 ```
 
