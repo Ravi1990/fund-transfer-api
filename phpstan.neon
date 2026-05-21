@@ -1,0 +1,10 @@
+parameters:
+    level: 9
+    paths:
+        - src
+    symfony:
+        containerXmlPath: var/cache/dev/App_KernelDevDebugContainer.xml
+    doctrine:
+        objectManagerLoader: tests/doctrine-object-manager.php
+    ignoreErrors: []
+    checkMissingIterableValueType: false

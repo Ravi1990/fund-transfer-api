@@ -1,0 +1,12 @@
+/vendor/
+/var/
+/.env.local
+/.env.*.local
+/node_modules/
+/.php-cs-fixer.cache
+/.phpunit.cache
+/.phpunit.result.cache
+/build/
+*.log
+.DS_Store
+/public/bundles/

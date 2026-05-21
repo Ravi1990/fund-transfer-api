@@ -1,0 +1,13 @@
+framework:
+    cache:
+        default_redis_provider: 'redis://redis:6379'
+        app: cache.adapter.redis
+        pools:
+            cache.idempotency:
+                adapter: cache.adapter.redis
+                provider: 'redis://redis:6379'
+                default_lifetime: 86400
+            cache.rate_limiter:
+                adapter: cache.adapter.redis
+                provider: 'redis://redis:6379'
+                default_lifetime: 7200

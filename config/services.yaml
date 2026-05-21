@@ -1,0 +1,28 @@
+parameters:
+
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+        public: false
+
+    App\:
+        resource: '../src/'
+        exclude:
+            - '../src/Domain/Entity/'
+            - '../src/Domain/Enum/'
+            - '../src/Domain/Exception/'
+            - '../src/Domain/ValueObject/'
+            - '../src/Kernel.php'
+
+    App\Infrastructure\Cache\IdempotencyStore:
+        arguments:
+            $cacheIdempotency: '@cache.idempotency'
+
+    App\Controller\HealthController:
+        arguments:
+            $cacheIdempotency: '@cache.idempotency'
+
+    App\Controller\TransferController:
+        arguments:
+            $transferByAccountLimiter: '@limiter.transfer_by_account'
