@@ -19,6 +19,16 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 )]
 final class SeedAccountsCommand extends Command
 {
+    /**
+     * Fixed ULIDs ensure README curl examples always work.
+     * These are valid ULID format strings (26 chars, Crockford base32).
+     */
+    public const ALICE = '01HXFUND0000000000000AL1CE';
+    public const BOB   = '01HXFUND000000000000000B0B';
+    public const CAROL = '01HXFUND00000000000000CA01';
+    public const DAVE  = '01HXFUND000000000000000DA5';
+    public const EVE   = '01HXFUND0000000000000EV300';
+
     public function __construct(
         private readonly EntityManagerInterface $em,
     ) {
@@ -29,85 +39,38 @@ final class SeedAccountsCommand extends Command
     {
         $io = new SymfonyStyle($input, $output);
 
-        // Check if already seeded
         $existing = $this->em->getConnection()
             ->executeQuery('SELECT COUNT(*) FROM accounts')
             ->fetchOne();
 
         if ($existing > 0) {
             $io->warning('Database already has accounts. Skipping seed.');
-            $io->note('Run: docker compose exec mysql mysql -u app -papp_pass fund_transfer -e "TRUNCATE accounts;" to reset.');
             return Command::SUCCESS;
         }
 
         $accounts = [
-            ['Alice Johnson', 1000000, 'USD', AccountStatus::Active],   // $10,000.00
-            ['Bob Smith',      500000, 'USD', AccountStatus::Active],   // $5,000.00
-            ['Carol White',    250000, 'USD', AccountStatus::Active],   // $2,500.00
-            ['Dave Brown',         0, 'USD', AccountStatus::Active],   // $0.00 (for insufficient funds test)
-            ['Eve Davis',     100000, 'USD', AccountStatus::Frozen],   // frozen account test
+            [self::ALICE, 'Alice Johnson', 1000000, 'USD', AccountStatus::Active],
+            [self::BOB,   'Bob Smith',      500000, 'USD', AccountStatus::Active],
+            [self::CAROL, 'Carol White',    250000, 'USD', AccountStatus::Active],
+            [self::DAVE,  'Dave Brown',          0, 'USD', AccountStatus::Active],
+            [self::EVE,   'Eve Davis',       100000, 'USD', AccountStatus::Frozen],
         ];
 
-        $created = [];
-        foreach ($accounts as [$name, $balance, $currency, $status]) {
-            $account = new Account($name, $balance, $currency, $status);
+        foreach ($accounts as [$publicId, $name, $balance, $currency, $status]) {
+            $account = new Account($name, $balance, $currency, $status, $publicId);
             $this->em->persist($account);
             $this->em->flush();
-            $created[] = $account;
         }
 
-        $io->success('Seeded ' . count($created) . ' accounts:');
-
+        $io->success('Seeded 5 accounts:');
         $io->table(
-            ['Owner', 'Public ID', 'Balance', 'Currency', 'Status'],
-            array_map(fn(Account $a) => [
-                $a->getOwnerName(),
-                $a->getPublicId(),
-                '$' . number_format($a->getBalanceCents() / 100, 2),
-                $a->getCurrency(),
-                $a->getStatus()->value,
-            ], $created)
+            ['Owner', 'Public ID', 'Balance', 'Status'],
+            array_map(fn(array $a) => [
+                $a[1], $a[0],
+                '$' . number_format($a[2] / 100, 2),
+                $a[4]->value,
+            ], $accounts)
         );
-
-        $io->section('Quick test commands:');
-
-        $alice = $created[0]->getPublicId();
-        $bob   = $created[1]->getPublicId();
-        $dave  = $created[3]->getPublicId();
-        $eve   = $created[4]->getPublicId();
-
-        $io->writeln("# Happy path transfer (Alice → Bob):");
-        $io->writeln("curl -s -X POST http://localhost:8080/api/v1/transfers \\");
-        $io->writeln("  -H 'Content-Type: application/json' \\");
-        $io->writeln("  -d '{");
-        $io->writeln('    "idempotency_key": "test-001",');
-        $io->writeln('    "from_account_id": "' . $alice . '",');
-        $io->writeln('    "to_account_id":   "' . $bob . '",');
-        $io->writeln('    "amount":          "100.50",');
-        $io->writeln('    "currency":        "USD"');
-        $io->writeln("  }' | python3 -m json.tool");
-        $io->writeln('');
-        $io->writeln("# Insufficient funds (Dave has \$0):");
-        $io->writeln("curl -s -X POST http://localhost:8080/api/v1/transfers \\");
-        $io->writeln("  -H 'Content-Type: application/json' \\");
-        $io->writeln("  -d '{");
-        $io->writeln('    "idempotency_key": "test-002",');
-        $io->writeln('    "from_account_id": "' . $dave . '",');
-        $io->writeln('    "to_account_id":   "' . $alice . '",');
-        $io->writeln('    "amount":          "10.00",');
-        $io->writeln('    "currency":        "USD"');
-        $io->writeln("  }' | python3 -m json.tool");
-        $io->writeln('');
-        $io->writeln("# Frozen account (Eve is frozen):");
-        $io->writeln("curl -s -X POST http://localhost:8080/api/v1/transfers \\");
-        $io->writeln("  -H 'Content-Type: application/json' \\");
-        $io->writeln("  -d '{");
-        $io->writeln('    "idempotency_key": "test-003",');
-        $io->writeln('    "from_account_id": "' . $eve . '",');
-        $io->writeln('    "to_account_id":   "' . $alice . '",');
-        $io->writeln('    "amount":          "10.00",');
-        $io->writeln('    "currency":        "USD"');
-        $io->writeln("  }' | python3 -m json.tool");
 
         return Command::SUCCESS;
     }

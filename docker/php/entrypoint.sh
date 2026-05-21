@@ -1,6 +1,9 @@
 #!/bin/sh
 set -e
 
+echo "Installing dependencies..."
+composer install --no-interaction --prefer-dist --optimize-autoloader
+
 echo "Waiting for MySQL..."
 until php -r "new PDO('mysql:host=mysql;port=3306;dbname=fund_transfer', 'app', 'app_pass');" 2>/dev/null; do
     sleep 2

@@ -62,8 +62,9 @@ class Account
         int $balanceCents,
         string $currency,
         AccountStatus $status = AccountStatus::Active,
+        ?string $publicId = null,
     ) {
-        $this->publicId     = (string) new Ulid();
+        $this->publicId     = $publicId ?? (string) new Ulid();
         $this->ownerName    = $ownerName;
         $this->balanceCents = $balanceCents;
         $this->currency     = $currency;
