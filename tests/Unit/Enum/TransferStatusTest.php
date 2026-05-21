@@ -34,9 +34,9 @@ final class TransferStatusTest extends TestCase
         TransferStatus::Pending->transitionTo(TransferStatus::Completed);
     }
 
-    public function testPendingCannotTransitionToFailed(): void
+    public function testPendingCanTransitionToFailedDirectly(): void
     {
-        $this->expectException(InvalidTransferStateException::class);
+        $this->expectNotToPerformAssertions();
         TransferStatus::Pending->transitionTo(TransferStatus::Failed);
     }
 

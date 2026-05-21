@@ -6,6 +6,11 @@ namespace App\Application\Command;
 
 use App\Application\Query\GetTransferHandler;
 use App\Domain\Entity\Transfer;
+use App\Domain\Exception\AccountFrozenException;
+use App\Domain\Exception\AccountNotFoundException;
+use App\Domain\Exception\CurrencyMismatchException;
+use App\Domain\Exception\DuplicateTransferException;
+use App\Domain\Exception\InsufficientFundsException;
 use App\Domain\Service\TransferDomainService;
 use App\Domain\ValueObject\Money;
 use App\Infrastructure\Cache\IdempotencyStore;
@@ -17,26 +22,16 @@ use Psr\Log\LoggerInterface;
 /**
  * Orchestrates the transfer use case.
  *
- * Locking protocol (see TransferDomainService for full rationale):
- *   1. Validate from != to BEFORE any lock (cheapest check first).
- *   2. Check idempotency store (Redis Layer 1, then DB Layer 2).
- *   3. Mark idempotency key as "processing" in Redis.
- *   4. Open DB transaction.
- *   5. Resolve both accounts by public ID (no lock yet).
- *   6. Determine lock order: MIN(internal id) locked first.
- *      This eliminates deadlocks for concurrent crossing transfers
- *      e.g. A→B and B→A arriving simultaneously.
- *   7. SELECT FOR UPDATE on both accounts in determined order.
- *   8. Validate business rules (active, currency, balance) AFTER locks.
- *   9. Create Transfer record, mark processing, debit, credit, mark completed.
- *  10. Persist audit log entries, flush, commit.
- *  11. Cache completed response in idempotency store.
+ * Idempotency policy:
+ *   - On success:          markCompleted() → replays return cached 201
+ *   - On business failure: persist Transfer as 'failed' + markFailed()
+ *                          → replays return cached failure response (409/422)
+ *                          → client knows the outcome, can use a new key to retry
+ *   - On infra failure:    delete() idempotency key
+ *                          → client can safely retry with the same key
  *
- * On any business rule failure: mark transfer failed, flush, commit,
- * cache failure response so replay returns consistent error.
- *
- * On infrastructure failure: delete idempotency key so the client
- * can retry — no DB record was created.
+ * This ensures the idempotency key never stays in 'processing' state
+ * after the request completes, regardless of outcome.
  */
 final class InitiateTransferHandler
 {
@@ -66,13 +61,13 @@ final class InitiateTransferHandler
 
         if ($cached !== null) {
             if ($cached['status'] === 'processing') {
-                throw new \App\Domain\Exception\DuplicateTransferException($command->idempotencyKey);
+                throw new DuplicateTransferException($command->idempotencyKey);
             }
 
             // Completed or failed replay — return cached response
             return [
                 'response'   => $cached['response'],
-                'httpStatus' => 200,
+                'httpStatus' => $cached['status'] === 'completed' ? 200 : $cached['httpStatus'],
             ];
         }
 
@@ -84,16 +79,14 @@ final class InitiateTransferHandler
         try {
             $this->entityManager->beginTransaction();
 
-            // Step 4 — resolve accounts without lock to get internal IDs
+            // Resolve accounts without lock to get internal IDs
             $fromAccount = $this->accountRepository->findByPublicId($command->fromAccountId);
             $toAccount   = $this->accountRepository->findByPublicId($command->toAccountId);
 
             $fromId = (int) $fromAccount->getId();
             $toId   = (int) $toAccount->getId();
 
-            // Step 5 — acquire locks in ascending ID order to prevent deadlocks.
-            // If A→B and B→A arrive simultaneously, both will lock the lower ID
-            // first, so one blocks until the other commits rather than deadlocking.
+            // Acquire locks in ascending ID order to prevent deadlocks
             if ($fromId < $toId) {
                 $fromAccount = $this->accountRepository->findByIdForUpdate($fromId);
                 $toAccount   = $this->accountRepository->findByIdForUpdate($toId);
@@ -102,11 +95,10 @@ final class InitiateTransferHandler
                 $fromAccount = $this->accountRepository->findByIdForUpdate($fromId);
             }
 
-            // Step 6 — validate business rules AFTER acquiring locks.
-            // Reading balance before lock could race with another transaction.
+            // Validate business rules AFTER acquiring locks
             $this->domainService->validateTransfer($fromAccount, $toAccount, $money);
 
-            // Step 7 — create Transfer record and transition through states
+            // Create Transfer record and transition through states
             $transfer = new Transfer(
                 fromAccount:    $fromAccount,
                 toAccount:      $toAccount,
@@ -117,7 +109,7 @@ final class InitiateTransferHandler
             );
 
             $this->transferRepository->save($transfer);
-            $this->entityManager->flush(); // Get DB-assigned ID for audit log
+            $this->entityManager->flush();
 
             // Audit: pending → processing
             $auditProcessing = $this->domainService->createAuditLog(
@@ -129,7 +121,7 @@ final class InitiateTransferHandler
             $transfer->markProcessing();
             $this->transferRepository->saveAuditLog($auditProcessing);
 
-            // Step 8 — apply balance mutations within the same transaction
+            // Apply balance mutations
             $this->domainService->applyTransfer($fromAccount, $toAccount, $money);
 
             // Audit: processing → completed
@@ -155,29 +147,56 @@ final class InitiateTransferHandler
             ]);
 
             $response = $this->getTransferHandler->serialize($transfer);
-
-            // Cache completed response for idempotency replay
             $this->idempotencyStore->markCompleted($command->idempotencyKey, $response);
 
             return ['response' => $response, 'httpStatus' => 201];
 
-        } catch (\App\Domain\Exception\InsufficientFundsException
-            | \App\Domain\Exception\AccountFrozenException
-            | \App\Domain\Exception\CurrencyMismatchException $e
+        } catch (InsufficientFundsException
+            | AccountFrozenException
+            | CurrencyMismatchException
+            | AccountNotFoundException $e
         ) {
-            // Business rule failure — record in DB for audit trail, then re-throw
-            $this->handleBusinessFailure($command->idempotencyKey, $e);
+            // Business rule failure — persist a failed Transfer record so the
+            // audit trail shows the attempt, then cache the failure response.
+            // Replays with the same idempotency key return the cached failure
+            // immediately — client must use a new key to attempt a fresh transfer.
+            $httpStatus = $this->resolveHttpStatus($e);
+            $errorCode  = $this->resolveErrorCode($e);
+
+            $this->persistFailedTransfer($command, $money, $e->getMessage());
+
+            $failureResponse = [
+                'error' => [
+                    'code'    => $errorCode,
+                    'message' => $e->getMessage(),
+                ],
+            ];
+
+            $this->idempotencyStore->markFailed(
+                $command->idempotencyKey,
+                $failureResponse,
+                $httpStatus,
+            );
+
+            $this->logger->warning('Transfer rejected — business rule violation', [
+                'idempotency_key' => $command->idempotencyKey,
+                'error_code'      => $errorCode,
+                'error'           => $e->getMessage(),
+                'outcome'         => 'failure',
+            ]);
+
             throw $e;
 
         } catch (\Throwable $e) {
-            // Infrastructure failure — rollback, remove idempotency key so
-            // client can safely retry (no partial DB record exists)
+            // Infrastructure failure — rollback and delete idempotency key.
+            // No DB record was created, so the client can safely retry
+            // with the same idempotency key.
             if ($this->entityManager->getConnection()->isTransactionActive()) {
                 $this->entityManager->rollback();
             }
             $this->idempotencyStore->delete($command->idempotencyKey);
 
-            $this->logger->error('Transfer failed with infrastructure error', [
+            $this->logger->error('Transfer failed — infrastructure error', [
                 'idempotency_key' => $command->idempotencyKey,
                 'error'           => $e->getMessage(),
                 'outcome'         => 'failure',
@@ -187,20 +206,86 @@ final class InitiateTransferHandler
         }
     }
 
-    private function handleBusinessFailure(string $idempotencyKey, \Throwable $e): void
-    {
+    /**
+     * Persist a failed Transfer record for audit trail purposes.
+     * Runs in its own transaction since the original one was rolled back.
+     */
+    private function persistFailedTransfer(
+        InitiateTransferCommand $command,
+        Money $money,
+        string $reason,
+    ): void {
         try {
+            // Roll back any open transaction first
             if ($this->entityManager->getConnection()->isTransactionActive()) {
                 $this->entityManager->rollback();
             }
-        } catch (\Throwable) {
-            // Rollback failure — nothing more we can do
-        }
 
-        $this->logger->warning('Transfer failed with business rule violation', [
-            'idempotency_key' => $idempotencyKey,
-            'error'           => $e->getMessage(),
-            'outcome'         => 'failure',
-        ]);
+            // Clear EM state to avoid stale entity issues
+            $this->entityManager->clear();
+
+            $this->entityManager->beginTransaction();
+
+            $fromAccount = $this->accountRepository->findByPublicId($command->fromAccountId);
+            $toAccount   = $this->accountRepository->findByPublicId($command->toAccountId);
+
+            $transfer = new Transfer(
+                fromAccount:    $fromAccount,
+                toAccount:      $toAccount,
+                amountCents:    $money->cents,
+                currency:       $money->currency,
+                idempotencyKey: $command->idempotencyKey,
+                description:    $command->description,
+            );
+
+            $this->transferRepository->save($transfer);
+            $this->entityManager->flush();
+
+            $auditFailed = $this->domainService->createAuditLog(
+                transfer:   $transfer,
+                fromStatus: 'pending',
+                toStatus:   'failed',
+                actor:      'api',
+                reason:     $reason,
+            );
+            $transfer->markFailed($reason);
+            $this->transferRepository->saveAuditLog($auditFailed);
+
+            $this->entityManager->flush();
+            $this->entityManager->commit();
+
+        } catch (\Throwable $e) {
+            // If we can't persist the failed record, just log and continue.
+            // The idempotency store will still cache the failure response.
+            if ($this->entityManager->getConnection()->isTransactionActive()) {
+                $this->entityManager->rollback();
+            }
+            $this->logger->error('Could not persist failed transfer record', [
+                'idempotency_key' => $command->idempotencyKey,
+                'error'           => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function resolveHttpStatus(\Throwable $e): int
+    {
+        return match (true) {
+            $e instanceof InsufficientFundsException  => 409,
+            $e instanceof AccountNotFoundException    => 404,
+            $e instanceof AccountFrozenException      => 422,
+            $e instanceof CurrencyMismatchException   => 422,
+            default                                   => 500,
+        };
+    }
+
+    private function resolveErrorCode(\Throwable $e): string
+    {
+        return match (true) {
+            $e instanceof InsufficientFundsException  => 'INSUFFICIENT_FUNDS',
+            $e instanceof AccountNotFoundException    => 'ACCOUNT_NOT_FOUND',
+            $e instanceof AccountFrozenException      => 'ACCOUNT_FROZEN',
+            $e instanceof CurrencyMismatchException   => 'CURRENCY_MISMATCH',
+            default                                   => 'INTERNAL_ERROR',
+        };
     }
 }

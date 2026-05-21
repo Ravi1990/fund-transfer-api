@@ -19,7 +19,9 @@ enum TransferStatus: string
     public function allowedTransitions(): array
     {
         return match ($this) {
-            self::Pending    => [self::Processing],
+            // pending → failed: business rule rejected before processing started
+            // pending → processing: normal flow
+            self::Pending    => [self::Processing, self::Failed],
             self::Processing => [self::Completed, self::Failed],
             self::Completed  => [],
             self::Failed     => [],
