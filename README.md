@@ -235,7 +235,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for full decision records.
 
 ## Time Spent
 
-~8 hours including debugging Symfony 8 / PHP 8.4 / DoctrineBundle 3 compatibility issues during initial setup.
+~10 hours including significant debugging of Symfony 8 / PHP 8.4 / DoctrineBundle 3 compatibility issues, idempotency edge cases, and Docker networking during setup.
 
 ## AI Tools Used
 
