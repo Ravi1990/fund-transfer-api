@@ -2,6 +2,14 @@
 
 A production-grade Fund Transfer API built with PHP 8.4, Symfony 8, MySQL 8, and Redis 7.
 
+## Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac/Windows) or Docker Engine (Linux)
+- Docker Compose v2+ (included with Docker Desktop)
+- Port 8080, 3306, 6379 available on your machine
+
+> **Windows users:** WSL2 is recommended. Enable it in Docker Desktop settings under *General → Use WSL2 based engine*.
+
 ## Quick Start
 
 ```bash
